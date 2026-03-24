@@ -1,0 +1,15 @@
+{
+  "type": "MESSAGE",
+  "message": {
+    "text": "@JiraBot app crashes on sync",
+    "argumentText": "app crashes on sync",
+    "sender": {
+      "displayName": "Aniket",
+      "name": "users/123"
+    },
+    "space": {
+      "name": "spaces/AAAA123",
+      "type": "SPACE"
+    }
+  }
+}
