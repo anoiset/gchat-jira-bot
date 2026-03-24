@@ -1,0 +1,10 @@
+{
+  "type": "MESSAGE",
+  "message": {
+    "argumentText": "/confirm",
+    "sender": {
+      "displayName": "Aniket",
+      "name": "users/123"
+    }
+  }
+}
