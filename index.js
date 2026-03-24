@@ -29,6 +29,17 @@ app.post("/", async (req, res) => {
     if (event.type === "MESSAGE") {
       return await handleMessage(event, res);
     }
+    // ✅ Slash command / bot click
+    else if (event.type === "APP_COMMAND") {
+      responseText = "JiraBot triggered 🚀";
+      return res.json({ text: responseText });
+    }
+
+    // ✅ Bot added to space
+    else if (event.type === "ADDED_TO_SPACE") {
+      responseText = "Thanks for adding me 👋";
+      return res.json({ text: responseText });
+    }
 
     return res.json({ text: "Unsupported event" });
 
