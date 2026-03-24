@@ -1,10 +1,89 @@
 {
-  "type": "MESSAGE",
-  "message": {
-    "argumentText": "app crashes on sync",
-    "sender": {
-      "displayName": "Aniket",
-      "name": "users/123"
-    }
-  }
+    "authorizationEventObject": {
+        "systemIdToken": "eyJhbGciOiJSUzI1NiIsImtpZCI6ImM0MWYxNDFhYTE5ZGYwYWM5N2RhYTU1ZTYwMDc2NmM0YzUzNjRjNDIiLCJ0eXAiOiJKV1QifQ.eyJhdWQiOiJodHRwczovL2djaGF0LWppcmEtYm90LTEwMjU1NDE0MTYyMjcuYXNpYS1zb3V0aDEucnVuLmFwcCIsImF6cCI6IjEwOTY0ODA2MzA5MjM0NzQ1NDc3NiIsImVtYWlsIjoic2VydmljZS0xMDI1NTQxNDE2MjI3QGdjcC1zYS1nc3VpdGVhZGRvbnMuaWFtLmdzZXJ2aWNlYWNjb3VudC5jb20iLCJlbWFpbF92ZXJpZmllZCI6dHJ1ZSwiZXhwIjoxNzc0MzUyNjE1LCJpYXQiOjE3NzQzNDkwMTUsImlzcyI6Imh0dHBzOi8vYWNjb3VudHMuZ29vZ2xlLmNvbSIsInN1YiI6IjEwOTY0ODA2MzA5MjM0NzQ1NDc3NiJ9.GLkgslaZuj_1P-XYonV5PdqwLv3pGuiXrSlcxSbUZa4X4z6WgZQLQ3oJeJ_ASFP6x1YR_rzuZe36411bIbSWiMTlu8Qw9XvkpGAykUK1nncu6-L0CnXdJVfWmCZ53D7MKVewKl8KQMpu-GeFfT7S62Gu6ZpbNHToHOTbLanlE41vItyRtdt9hhSa9SJwoF5IqCShHBW_0nBv8dWew-PLMn09hGv-2ljGfCUAj67hrspr9FTQO5obgZlxLkDvdSJCh62oZcmsB34eiQtzRRui6kwpIse3mu83KfH82Psm8kcsdgGPlnKYJm_aTqLsqiqiT_O0m8lzIkwVtDDb652oDg"
+    },
+    "chat": {
+        "configCompleteRedirectUri": "https://chat.google.com/api/bot_config_complete?token=AGSmvGMslnUCGz0ZLrNC4CfFNnzp6XSMguprs7QlvFAh7YMXLVGTCsfquzRvHt5wKOmMZCo-MvJWl0OeqCC9-wDx0v3U39mph_9z6n-tybeLYEpuwLDwQEGdMjDELf2IfJMRJ2DgEPDki9S7oQvaWBKdrg%3D%3D",
+        "eventTime": "2026-03-24T10:43:34.887487Z",
+        "messagePayload": {
+            "message": {
+                "annotations": [
+                    {
+                        "length": 9,
+                        "startIndex": 0,
+                        "type": "USER_MENTION",
+                        "userMention": {
+                            "type": "MENTION",
+                            "user": {
+                                "avatarUrl": "https://lh6.googleusercontent.com/proxy/yNIjT7WKl3HxSm-u468-yf4LJHPpTC9IoXHhtCxnDSmiaJsosj3rrIXUZgLhU3mhVmsfbKaCujIhNI9nywD4btdYsqKPuMeIqHqLw1cUSok0dDV4V_ap",
+                                "displayName": "Jira Bot",
+                                "name": "users/115023323040006176802",
+                                "type": "BOT"
+                            }
+                        }
+                    }
+                ],
+                "argumentText": " fix the falcon bot",
+                "createTime": "2026-03-24T10:43:34.887487Z",
+                "formattedText": "@Jira Bot fix the falcon bot",
+                "messageHistoryState": "HISTORY_ON",
+                "name": "spaces/AAQApiGZoyQ/messages/DJ0H-pN3ldE.DJ0H-pN3ldE",
+                "retentionSettings": {
+                    "state": "PERMANENT"
+                },
+                "sender": {
+                    "avatarUrl": "https://lh3.googleusercontent.com/a/ACg8ocIe0uYetjx5u9qtEHngfpkCNVs_K9xILqcI44_VoFueRjkm6A=k-no",
+                    "displayName": "Kumar Aniket",
+                    "domainId": "46jv655",
+                    "email": "kumar.aniket@nexxbase.com",
+                    "name": "users/111042312761029785230",
+                    "type": "HUMAN"
+                },
+                "space": {
+                    "customer": "customers/C046jv655",
+                    "displayName": "Falcon Testing Bot",
+                    "lastActiveTime": "2026-03-24T10:43:34.887487Z",
+                    "membershipCount": {
+                        "joinedDirectHumanUserCount": 4
+                    },
+                    "name": "spaces/AAQApiGZoyQ",
+                    "spaceHistoryState": "HISTORY_ON",
+                    "spaceThreadingState": "THREADED_MESSAGES",
+                    "spaceType": "SPACE",
+                    "spaceUri": "https://chat.google.com/room/AAQApiGZoyQ?cls=11",
+                    "type": "ROOM"
+                },
+                "text": "@Jira Bot fix the falcon bot",
+                "thread": {
+                    "name": "spaces/AAQApiGZoyQ/threads/DJ0H-pN3ldE",
+                    "retentionSettings": {
+                        "state": "PERMANENT"
+                    }
+                }
+            },
+            "space": {
+                "customer": "customers/C046jv655",
+                "displayName": "Falcon Testing Bot",
+                "lastActiveTime": "2026-03-24T10:43:34.887487Z",
+                "membershipCount": {
+                    "joinedDirectHumanUserCount": 4
+                },
+                "name": "spaces/AAQApiGZoyQ",
+                "spaceHistoryState": "HISTORY_ON",
+                "spaceThreadingState": "THREADED_MESSAGES",
+                "spaceType": "SPACE",
+                "spaceUri": "https://chat.google.com/room/AAQApiGZoyQ?cls=11",
+                "type": "ROOM"
+            }
+        },
+        "user": {
+            "avatarUrl": "https://lh3.googleusercontent.com/a/ACg8ocIe0uYetjx5u9qtEHngfpkCNVs_K9xILqcI44_VoFueRjkm6A=k-no",
+            "displayName": "Kumar Aniket",
+            "domainId": "46jv655",
+            "email": "kumar.aniket@nexxbase.com",
+            "name": "users/111042312761029785230",
+            "type": "HUMAN"
+        }
+    },
+    "offset": 19800000
 }
