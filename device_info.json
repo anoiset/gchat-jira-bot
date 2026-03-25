@@ -1,0 +1,20 @@
+{
+  "kumar.aniket@nexxbase.com": {
+    "watchMAC": "A1:B2:C3:D4:E5:F6",
+    "watchVersion": "v2.4.1",
+    "mobileVersion": "iOS 17.2",
+    "appVersion": "v3.1.0"
+  },
+  "john.doe@example.com": {
+    "watchMAC": "11:22:33:44:55:66",
+    "watchVersion": "v2.3.5",
+    "mobileVersion": "Android 14",
+    "appVersion": "v3.0.8"
+  },
+  "default": {
+    "watchMAC": "N/A",
+    "watchVersion": "N/A",
+    "mobileVersion": "N/A",
+    "appVersion": "N/A"
+  }
+}

@@ -3,6 +3,12 @@ import fetch from "node-fetch";
 import dotenv from "dotenv";
 import { google } from "googleapis";
 import FormData from "form-data";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 dotenv.config();
 
@@ -63,6 +69,25 @@ async function sendMessage(spaceName, text) {
   }
 }
 
+// ─── GET DEVICE INFO FROM JSON ────────────────
+function getDeviceInfo(email) {
+  try {
+    const deviceDataPath = path.join(__dirname, "device_info.json");
+    const deviceData = JSON.parse(fs.readFileSync(deviceDataPath, "utf-8"));
+    
+    // Return user-specific data if exists, otherwise return default
+    return deviceData[email] || deviceData["default"];
+  } catch (err) {
+    console.error("Error reading device info:", err.message);
+    return {
+      watchMAC: "N/A",
+      watchVersion: "N/A",
+      mobileVersion: "N/A",
+      appVersion: "N/A"
+    };
+  }
+}
+
 // ─── ENTRY POINT ──────────────────────────────
 app.post("/", async (req, res) => {
   res.sendStatus(200);
@@ -102,7 +127,8 @@ app.post("/", async (req, res) => {
 // ─── HANDLE MESSAGE ───────────────────────────
 async function handleMessage(message, spaceName) {
   const senderName = message.sender?.displayName || "Unknown";
-  const senderId = message.sender?.name || message.sender?.email || "unknown";
+  const senderEmail = message.sender?.email || "unknown";
+  const senderId = message.sender?.name || senderEmail;
   const text = (message.argumentText || message.text || "").trim();
 
   // Strip the bot mention from text if present
@@ -116,7 +142,7 @@ async function handleMessage(message, spaceName) {
   // ── COMMAND FLOW ────────────────────────────
   if (session && session.state === "DRAFT") {
     if (cleanText === "/confirm")
-      return await createTicket(session, senderName, sessionKey, spaceName);
+      return await createTicket(session, senderName, senderEmail, sessionKey, spaceName);
     if (cleanText === "/rephrase") {
       sessions[sessionKey].state = "WAITING_REPHRASE";
       return await sendMessage(spaceName, "✏️ Re-describe your issue.");
@@ -157,6 +183,7 @@ async function handleMessage(message, spaceName) {
     return await createTicket(
       sessions[sessionKey],
       senderName,
+      senderEmail,
       sessionKey,
       spaceName
     );
@@ -223,6 +250,7 @@ async function parseWithOpenAI(text, senderName) {
             role: "system",
             content: `You extract Jira ticket fields from user messages. 
 Respond ONLY with raw JSON, no markdown, no code fences, no explanation.
+You have to only provide the priority if it's explicitly mentioned by the user, otherwise leave it blank.
 Format:
 {
   "summary": "short title",
@@ -258,9 +286,20 @@ Format:
 }
 
 // ─── CREATE JIRA TICKET ──────────────────────
-async function createTicket(session, senderName, sessionKey, spaceName) {
+async function createTicket(session, senderName, senderEmail, sessionKey, spaceName) {
   try {
     const s = session.structured;
+    
+    // Fetch device info
+    const deviceInfo = getDeviceInfo(senderEmail);
+    const deviceInfoText = `【Watch MAC】${deviceInfo.watchMAC}
+【Watch Version】${deviceInfo.watchVersion}
+【Mobile Version】${deviceInfo.mobileVersion}
+【App Version】${deviceInfo.appVersion}
+
+─────────────────
+
+${s.description}`;
 
     const response = await fetch(`${JIRA_DOMAIN}/rest/api/3/issue`, {
       method: "POST",
@@ -280,11 +319,11 @@ async function createTicket(session, senderName, sessionKey, spaceName) {
             content: [
               {
                 type: "paragraph",
-                content: [{ type: "text", text: s.description }],
+                content: [{ type: "text", text: deviceInfoText }],
               },
             ],
           },
-          issuetype: { name: s.issueType || "Task" },
+          issuetype: { name: s.issueType || "Bug" },
           priority: { name: s.priority || "Medium" },
         },
       }),
