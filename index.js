@@ -2,6 +2,7 @@ import express from "express";
 import fetch from "node-fetch";
 import dotenv from "dotenv";
 import { google } from "googleapis";
+import FormData from "form-data";
 
 dotenv.config();
 
@@ -14,30 +15,39 @@ const {
   JIRA_API_TOKEN,
   JIRA_PROJECT,
   OPENAI_API_KEY,
-  GOOGLE_SERVICE_ACCOUNT_JSON, // JSON string of the service account key (for Cloud Run, set as env var)
+  GOOGLE_SERVICE_ACCOUNT_BASE64,
+  GOOGLE_SERVICE_ACCOUNT_JSON,
 } = process.env;
 
 const sessions = {};
 
 // ─── GOOGLE CHAT AUTH ─────────────────────────
-function getChatClient() {
-  let auth;
+function getGoogleAuth() {
+  let credentials;
 
-  if (GOOGLE_SERVICE_ACCOUNT_JSON) {
-    // Use service account key from env var (recommended for Cloud Run)
-    const credentials = JSON.parse(GOOGLE_SERVICE_ACCOUNT_JSON);
-    auth = new google.auth.GoogleAuth({
+  if (GOOGLE_SERVICE_ACCOUNT_BASE64) {
+    const decoded = Buffer.from(GOOGLE_SERVICE_ACCOUNT_BASE64, "base64").toString("utf-8");
+    credentials = JSON.parse(decoded);
+  } else if (GOOGLE_SERVICE_ACCOUNT_JSON) {
+    credentials = JSON.parse(GOOGLE_SERVICE_ACCOUNT_JSON);
+  }
+
+  if (credentials) {
+    return new google.auth.GoogleAuth({
       credentials,
-      scopes: ["https://www.googleapis.com/auth/chat.bot"],
-    });
-  } else {
-    // Fall back to Application Default Credentials
-    auth = new google.auth.GoogleAuth({
       scopes: ["https://www.googleapis.com/auth/chat.bot"],
     });
   }
 
-  return google.chat({ version: "v1", auth });
+  return new google.auth.GoogleAuth({
+    scopes: ["https://www.googleapis.com/auth/chat.bot"],
+  });
+}
+
+const googleAuth = getGoogleAuth();
+
+function getChatClient() {
+  return google.chat({ version: "v1", auth: googleAuth });
 }
 
 // ─── SEND MESSAGE TO GOOGLE CHAT ──────────────
@@ -55,18 +65,20 @@ async function sendMessage(spaceName, text) {
 
 // ─── ENTRY POINT ──────────────────────────────
 app.post("/", async (req, res) => {
-  // Immediately acknowledge — Google Chat won't wait for your response body
   res.sendStatus(200);
 
   try {
     const event = req.body;
-    console.log("Received event:", JSON.stringify(event, null, 2));
+    console.log("===== FULL RAW EVENT =====");
+    console.log(JSON.stringify(event, null, 2));
+    console.log("===== END EVENT =====");
 
-    const payload = event.chat?.messagePayload;
+    // Support both old format (event.chat) and new format (event.event.chat)
+    const chatData = event.event?.chat || event.chat;
+    const payload = chatData?.messagePayload;
 
-    // No message payload — could be ADDED_TO_SPACE or similar
     if (!payload?.message) {
-      const spaceName = event.chat?.messagePayload?.space?.name || event.chat?.space?.name;
+      const spaceName = payload?.space?.name || chatData?.space?.name;
       if (spaceName) {
         await sendMessage(spaceName, "👋 Jira Bot ready! Tag me to create tickets.");
       }
@@ -74,7 +86,7 @@ app.post("/", async (req, res) => {
     }
 
     const message = payload.message;
-    const spaceName = message.space?.name;
+    const spaceName = message.space?.name || payload.space?.name;
 
     if (!spaceName) {
       console.error("No space name found in event");
@@ -90,50 +102,83 @@ app.post("/", async (req, res) => {
 // ─── HANDLE MESSAGE ───────────────────────────
 async function handleMessage(message, spaceName) {
   const senderName = message.sender?.displayName || "Unknown";
-  const senderId = message.sender?.name || "unknown";
+  const senderId = message.sender?.name || message.sender?.email || "unknown";
   const text = (message.argumentText || message.text || "").trim();
 
-  console.log("Sender:", senderName, "| Text:", text);
+  // Strip the bot mention from text if present
+  const cleanText = text.replace(/^@\s*Jira\s*Bot\s*/i, "").trim();
+
+  console.log("Sender:", senderName, "| Text:", cleanText);
 
   const sessionKey = senderId;
   const session = sessions[sessionKey];
 
   // ── COMMAND FLOW ────────────────────────────
   if (session && session.state === "DRAFT") {
-    if (text === "/confirm") return await createTicket(session, senderName, sessionKey, spaceName);
-    if (text === "/rephrase") {
+    if (cleanText === "/confirm")
+      return await createTicket(session, senderName, sessionKey, spaceName);
+    if (cleanText === "/rephrase") {
       sessions[sessionKey].state = "WAITING_REPHRASE";
       return await sendMessage(spaceName, "✏️ Re-describe your issue.");
     }
-    if (text === "/attach") {
+    if (cleanText === "/attach") {
       sessions[sessionKey].state = "WAITING_ATTACHMENT";
-      return await sendMessage(spaceName, "📎 Send attachments now.");
+      return await sendMessage(spaceName, "📎 Send your attachments now (attach a file to your message).");
     }
-    if (text === "/cancel") {
+    if (cleanText === "/cancel") {
       delete sessions[sessionKey];
       return await sendMessage(spaceName, "🚫 Ticket cancelled.");
     }
   }
 
   if (session && session.state === "WAITING_ATTACHMENT") {
-    return await createTicket(session, senderName, sessionKey, spaceName);
+    // ──────────────────────────────────────────
+    // FIX: Check "attachments" (plural — new format) AND "attachment" (singular — old format)
+    // ──────────────────────────────────────────
+    const attachments = message.attachments || message.attachment || [];
+
+    console.log("Attachments in event:", JSON.stringify(attachments, null, 2));
+
+    if (attachments.length === 0) {
+      return await sendMessage(
+        spaceName,
+        "⚠️ No attachments found. Please send a file/image with your message, or type /confirm to create without attachments."
+      );
+    }
+
+    // Store the message name — we need it to fetch full attachment data via Chat API
+    sessions[sessionKey].messageName = message.name;
+    sessions[sessionKey].attachmentHints = attachments;
+
+    await sendMessage(
+      spaceName,
+      `📎 ${attachments.length} attachment(s) received. Creating ticket...`
+    );
+    return await createTicket(
+      sessions[sessionKey],
+      senderName,
+      sessionKey,
+      spaceName
+    );
   }
 
   if (session && session.state === "WAITING_REPHRASE") {
-    const structured = await parseWithOpenAI(text, senderName);
-    if (!structured) return await sendMessage(spaceName, "❌ Couldn't parse your request. Please try again.");
-    return await saveDraft(structured, text, senderName, sessionKey, spaceName);
+    const structured = await parseWithOpenAI(cleanText, senderName);
+    if (!structured)
+      return await sendMessage(spaceName, "❌ Couldn't parse your request. Please try again.");
+    return await saveDraft(structured, cleanText, senderName, sessionKey, spaceName);
   }
 
   // ── NEW MESSAGE ─────────────────────────────
-  if (!text) {
+  if (!cleanText) {
     return await sendMessage(spaceName, "👋 Describe your issue and I'll create a Jira ticket!");
   }
 
-  const structured = await parseWithOpenAI(text, senderName);
-  if (!structured) return await sendMessage(spaceName, "❌ Failed to understand your request. Please rephrase.");
+  const structured = await parseWithOpenAI(cleanText, senderName);
+  if (!structured)
+    return await sendMessage(spaceName, "❌ Failed to understand your request. Please rephrase.");
 
-  return await saveDraft(structured, text, senderName, sessionKey, spaceName);
+  return await saveDraft(structured, cleanText, senderName, sessionKey, spaceName);
 }
 
 // ─── SAVE DRAFT ───────────────────────────────
@@ -221,7 +266,8 @@ async function createTicket(session, senderName, sessionKey, spaceName) {
       method: "POST",
       headers: {
         Authorization:
-          "Basic " + Buffer.from(`${JIRA_EMAIL}:${JIRA_API_TOKEN}`).toString("base64"),
+          "Basic " +
+          Buffer.from(`${JIRA_EMAIL}:${JIRA_API_TOKEN}`).toString("base64"),
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
@@ -248,10 +294,26 @@ async function createTicket(session, senderName, sessionKey, spaceName) {
     console.log("Jira response:", JSON.stringify(data));
 
     if (data.key) {
+      // Handle attachments
+      let attachmentStatus = "";
+      if (session.messageName && session.attachmentHints?.length > 0) {
+        const results = await downloadAndUploadAttachments(
+          data.key,
+          session.messageName
+        );
+        const successCount = results.filter((r) => r.success).length;
+        const failCount = results.filter((r) => !r.success).length;
+        if (failCount > 0) {
+          attachmentStatus = `\n📎 Attachments: ${successCount} uploaded, ${failCount} failed`;
+        } else if (successCount > 0) {
+          attachmentStatus = `\n📎 ${successCount} attachment(s) uploaded`;
+        }
+      }
+
       delete sessions[sessionKey];
       await sendMessage(
         spaceName,
-        `✅ *Ticket Created*\n\nID: ${data.key}\nSummary: ${s.summary}\n\n🔗 ${JIRA_DOMAIN}/browse/${data.key}`
+        `✅ *Ticket Created*\n\nID: ${data.key}\nSummary: ${s.summary}${attachmentStatus}\n\n🔗 ${JIRA_DOMAIN}/browse/${data.key}`
       );
     } else {
       await sendMessage(spaceName, "❌ Jira error: " + JSON.stringify(data));
@@ -260,6 +322,157 @@ async function createTicket(session, senderName, sessionKey, spaceName) {
     console.error("Jira error:", err);
     await sendMessage(spaceName, "❌ Failed to create ticket: " + err.message);
   }
+}
+
+// ─── DOWNLOAD FROM GOOGLE CHAT & UPLOAD TO JIRA ───────────
+//
+// The webhook event only sends partial attachment metadata (contentName, contentType).
+// It does NOT include attachmentDataRef.resourceName needed to download the file.
+//
+// Solution:
+// 1. Use chat.spaces.messages.get() to fetch the FULL message with complete attachment data
+// 2. Extract attachmentDataRef.resourceName from the full response
+// 3. Use chat.media.download() with that resourceName to get the file bytes
+// 4. Upload the file bytes to Jira
+//
+async function downloadAndUploadAttachments(issueKey, messageName) {
+  const results = [];
+  const chat = getChatClient();
+
+  try {
+    // Step 1: Fetch the full message from Chat API to get complete attachment data
+    console.log("Fetching full message:", messageName);
+    const messageResponse = await chat.spaces.messages.get({
+      name: messageName,
+    });
+
+    const fullMessage = messageResponse.data;
+    // The full message uses "attachment" (singular) as the field name
+    const fullAttachments = fullMessage.attachment || fullMessage.attachments || [];
+
+    console.log("Full message attachment data:", JSON.stringify(fullAttachments, null, 2));
+
+    if (fullAttachments.length === 0) {
+      console.error("No attachments found in full message response");
+      return [{ success: false, fileName: "unknown", error: "No attachments in full message" }];
+    }
+
+    // Step 2: Process each attachment
+    for (const att of fullAttachments) {
+      const fileName = att.contentName || "attachment";
+      const contentType = att.contentType || "application/octet-stream";
+
+      try {
+        console.log(`Processing: ${fileName} (${contentType})`);
+        console.log("Full attachment object:", JSON.stringify(att, null, 2));
+
+        let fileBuffer;
+
+        if (att.attachmentDataRef?.resourceName) {
+          // ── PRIMARY METHOD: direct HTTP GET with ?alt=media ──
+          const resourceName = att.attachmentDataRef.resourceName;
+          console.log("Downloading via direct HTTP, resourceName:", resourceName);
+
+          const authClient = await googleAuth.getClient();
+          const tokenResponse = await authClient.getAccessToken();
+          const accessToken = tokenResponse.token || tokenResponse;
+
+          // IMPORTANT: Do NOT use encodeURIComponent on resourceName — it's base64
+          // with = and / characters that must NOT be percent-encoded.
+          // Plain string concat keeps the URL clean.
+          const finalUrl = "https://chat.googleapis.com/v1/media/" + resourceName + "?alt=media";
+          console.log(">>> Download URL:", finalUrl);
+
+          const dlResponse = await fetch(finalUrl, {
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+            },
+          });
+
+          if (!dlResponse.ok) {
+            const errText = await dlResponse.text();
+            console.error(">>> Download response status:", dlResponse.status);
+            console.error(">>> Download response body:", errText);
+            throw new Error(`media download failed: ${dlResponse.status} ${dlResponse.statusText}`);
+          }
+
+          fileBuffer = await dlResponse.buffer();
+
+        } else if (att.driveDataRef?.driveFileId) {
+          // ── DRIVE FILE: not supported yet ──
+          console.log("Skipping Drive attachment:", att.driveDataRef.driveFileId);
+          results.push({
+            success: false,
+            fileName,
+            error: "Google Drive attachments not supported yet",
+          });
+          continue;
+
+        } else if (att.downloadUri) {
+          // ── FALLBACK: try downloadUri with bearer token ──
+          console.log("Trying downloadUri fallback:", att.downloadUri);
+          const authClient = await googleAuth.getClient();
+          const tokenResponse = await authClient.getAccessToken();
+          const accessToken = tokenResponse.token || tokenResponse;
+
+          const dlResponse = await fetch(att.downloadUri, {
+            headers: { Authorization: `Bearer ${accessToken}` },
+          });
+
+          if (!dlResponse.ok) {
+            throw new Error(`downloadUri failed: ${dlResponse.status} ${dlResponse.statusText}`);
+          }
+          fileBuffer = await dlResponse.buffer();
+
+        } else {
+          console.error("No download method available:", JSON.stringify(att));
+          results.push({ success: false, fileName, error: "No resourceName or downloadUri" });
+          continue;
+        }
+
+        console.log(`Downloaded ${fileName}: ${fileBuffer.length} bytes`);
+
+        // Step 3: Upload to Jira
+        const form = new FormData();
+        form.append("file", fileBuffer, {
+          filename: fileName,
+          contentType: contentType,
+        });
+
+        const uploadResponse = await fetch(
+          `${JIRA_DOMAIN}/rest/api/3/issue/${issueKey}/attachments`,
+          {
+            method: "POST",
+            headers: {
+              Authorization:
+                "Basic " +
+                Buffer.from(`${JIRA_EMAIL}:${JIRA_API_TOKEN}`).toString("base64"),
+              "X-Atlassian-Token": "no-check",
+              ...form.getHeaders(),
+            },
+            body: form,
+          }
+        );
+
+        if (uploadResponse.ok) {
+          console.log(`✅ Uploaded ${fileName} to Jira issue ${issueKey}`);
+          results.push({ success: true, fileName });
+        } else {
+          const errorText = await uploadResponse.text();
+          console.error(`Failed to upload ${fileName} to Jira:`, errorText);
+          results.push({ success: false, fileName, error: errorText });
+        }
+      } catch (err) {
+        console.error(`Error processing attachment ${fileName}:`, err.message);
+        results.push({ success: false, fileName, error: err.message });
+      }
+    }
+  } catch (err) {
+    console.error("Error fetching full message:", err.message);
+    results.push({ success: false, fileName: "unknown", error: err.message });
+  }
+
+  return results;
 }
 
 // ─── START SERVER ─────────────────────────────
