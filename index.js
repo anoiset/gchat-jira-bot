@@ -69,21 +69,48 @@ async function sendMessage(spaceName, text) {
   }
 }
 
-// ─── GET DEVICE INFO FROM JSON ────────────────
-function getDeviceInfo(email) {
+// ─── GET DEVICE INFO FROM API ────────────────
+async function getDeviceInfo(email) {
   try {
-    const deviceDataPath = path.join(__dirname, "device_info.json");
-    const deviceData = JSON.parse(fs.readFileSync(deviceDataPath, "utf-8"));
+    const response = await fetch(
+      "https://logs-automation-326803110924.asia-south2.run.app/api/ingest/logs/retrieve",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ email }),
+      }
+    );
+
+    if (!response.ok) {
+      console.error("API response not OK:", response.status);
+      throw new Error(`API returned ${response.status}`);
+    }
+
+    const data = await response.json();
     
-    // Return user-specific data if exists, otherwise return default
-    return deviceData[email] || deviceData["default"];
-  } catch (err) {
-    console.error("Error reading device info:", err.message);
+    if (!data.success || !data.metadata) {
+      console.error("API returned unsuccessful response or missing metadata");
+      throw new Error("Invalid API response");
+    }
+
+    const meta = data.metadata;
     return {
-      watchMAC: "N/A",
-      watchVersion: "N/A",
-      mobileVersion: "N/A",
-      appVersion: "N/A"
+      deviceName: meta.deviceName || "Unknown",
+      watchMAC: meta.deviceMac || "Unknown",
+      watchVersion: meta.firmwareVersion || "Unknown",
+      mobileVersion: meta.phoneModel || "Unknown",
+      appVersion: meta.appVersion || "Unknown"
+    };
+  } catch (err) {
+    console.error("Error fetching device info from API:", err.message);
+    return {
+      deviceName: "Unknown",
+      watchMAC: "Unknown",
+      watchVersion: "Unknown",
+      mobileVersion: "Unknown",
+      appVersion: "Unknown"
     };
   }
 }
@@ -193,7 +220,7 @@ async function handleMessage(message, spaceName) {
     const structured = await parseWithOpenAI(cleanText, senderName);
     if (!structured)
       return await sendMessage(spaceName, "❌ Couldn't parse your request. Please try again.");
-    return await saveDraft(structured, cleanText, senderName, sessionKey, spaceName);
+    return await saveDraft(structured, cleanText, senderName, senderEmail, sessionKey, spaceName);
   }
 
   // ── NEW MESSAGE ─────────────────────────────
@@ -205,19 +232,40 @@ async function handleMessage(message, spaceName) {
   if (!structured)
     return await sendMessage(spaceName, "❌ Failed to understand your request. Please rephrase.");
 
-  return await saveDraft(structured, cleanText, senderName, sessionKey, spaceName);
+  return await saveDraft(structured, cleanText, senderName, senderEmail, sessionKey, spaceName);
 }
 
 // ─── SAVE DRAFT ───────────────────────────────
-async function saveDraft(structured, rawText, senderName, sessionKey, spaceName) {
-  sessions[sessionKey] = { state: "DRAFT", structured, rawText, senderName };
-
+async function saveDraft(structured, rawText, senderName, senderEmail, sessionKey, spaceName) {
+  // Fetch device info to show in draft
+  const deviceInfo = await getDeviceInfo(senderEmail);
+  
+  // Format device info for display
+  const deviceInfoText = `【Device Name】${deviceInfo.deviceName}
+【Watch MAC】${deviceInfo.watchMAC}
+【Watch Version】${deviceInfo.watchVersion}
+【Mobile Version】${deviceInfo.mobileVersion}
+【App Version】${deviceInfo.appVersion}`;
+  
+  // Store in session for later use in ticket creation
+  sessions[sessionKey] = { 
+    state: "DRAFT", 
+    structured, 
+    rawText, 
+    senderName,
+    deviceInfo 
+  };
+  console.log("deviceInfo stored in session:", deviceInfoText);
   const draftText = `📋 *Draft Ticket*
 
 *Summary:* ${structured.summary}
 *Priority:* ${structured.priority}
 *Type:* ${structured.issueType}
 
+*Device Info:*
+${deviceInfoText}
+
+*Description:*
 ${structured.description}
 
 ──────────────
@@ -290,9 +338,10 @@ async function createTicket(session, senderName, senderEmail, sessionKey, spaceN
   try {
     const s = session.structured;
     
-    // Fetch device info
-    const deviceInfo = getDeviceInfo(senderEmail);
-    const deviceInfoText = `【Watch MAC】${deviceInfo.watchMAC}
+    // Use device info from session (already fetched during draft)
+    const deviceInfo = session.deviceInfo || await getDeviceInfo(senderEmail);
+    const deviceInfoText = `【Device Name】${deviceInfo.deviceName}
+【Watch MAC】${deviceInfo.watchMAC}
 【Watch Version】${deviceInfo.watchVersion}
 【Mobile Version】${deviceInfo.mobileVersion}
 【App Version】${deviceInfo.appVersion}
