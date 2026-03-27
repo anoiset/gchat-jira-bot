@@ -72,6 +72,7 @@ async function sendMessage(spaceName, text) {
 // ─── GET DEVICE INFO FROM API ────────────────
 async function getDeviceInfo(email) {
   try {
+    console.log('inside the device info function with email:', email);
     const response = await fetch(
       "https://logs-automation-326803110924.asia-south2.run.app/api/ingest/logs/retrieve",
       {
