@@ -21,6 +21,7 @@ const {
   OPENAI_API_KEY,
   GOOGLE_SERVICE_ACCOUNT_BASE64,
   GOOGLE_SERVICE_ACCOUNT_JSON,
+  CLOUD_RUN_URL
 } = process.env;
 
 const sessions = {};
@@ -52,6 +53,43 @@ const googleAuth = getGoogleAuth();
 
 function getChatClient() {
   return google.chat({ version: "v1", auth: googleAuth });
+}
+
+// ─── DERIVE EVENT TYPE FROM ADD-ON PAYLOAD ────
+// Google Workspace add-ons don't have a top-level `type` field.
+// Instead, the event type is determined by which payload key exists under `chat`.
+function deriveEventType(chatData) {
+  if (!chatData) return "UNKNOWN";
+  if (chatData.messagePayload) return "MESSAGE";
+  if (chatData.buttonClickedPayload) return "CARD_CLICKED";
+  if (chatData.addedToSpacePayload) return "ADDED_TO_SPACE";
+  if (chatData.removedFromSpacePayload) return "REMOVED_FROM_SPACE";
+  if (chatData.widgetUpdatedPayload) return "WIDGET_UPDATED";
+  if (chatData.appCommandPayload) return "APP_COMMAND";
+  return "UNKNOWN";
+}
+
+// ─── EXTRACT SPACE NAME FROM ANY EVENT ────────
+function extractSpaceName(chatData, eventType) {
+  switch (eventType) {
+    case "MESSAGE":
+      return chatData.messagePayload?.space?.name
+        || chatData.messagePayload?.message?.space?.name;
+    case "CARD_CLICKED":
+      return chatData.buttonClickedPayload?.message?.space?.name
+        || chatData.buttonClickedPayload?.space?.name;
+    case "ADDED_TO_SPACE":
+      return chatData.addedToSpacePayload?.space?.name;
+    case "REMOVED_FROM_SPACE":
+      return chatData.removedFromSpacePayload?.space?.name;
+    default:
+      return null;
+  }
+}
+
+// ─── EXTRACT USER INFO FROM ANY EVENT ─────────
+function extractUser(chatData) {
+  return chatData?.user || null;
 }
 
 // ─── SEND MESSAGE TO GOOGLE CHAT ──────────────
@@ -106,7 +144,7 @@ async function getDeviceInfo(email) {
     }
 
     const data = await response.json();
-    
+
     if (!data.success || !data.metadata) {
       console.error("API returned unsuccessful response or missing metadata");
       throw new Error("Invalid API response");
@@ -138,42 +176,59 @@ app.post("/", async (req, res) => {
     const event = req.body;
     console.log("===== FULL RAW EVENT =====");
     console.log(JSON.stringify(event, null, 2));
-    console.log("Event type:", event.type);
+
+    // ── Extract chat data (add-on format) ──
+    const chatData = event.chat;
+    const eventType = deriveEventType(chatData);
+    const user = extractUser(chatData);
+    const spaceName = extractSpaceName(chatData, eventType);
+
+    console.log("Derived event type:", eventType);
+    console.log("Space:", spaceName);
+    console.log("User:", user?.displayName);
     console.log("===== END EVENT =====");
 
-    // Handle button clicks (CARD_CLICKED event)
-
-
-    // Support both old format (event.chat) and new format (event.event.chat)
-    const chatData = event.event?.chat || event.chat;
-    const payload = chatData?.messagePayload;
-
-    if (chatData?.buttonClickedPayload) {
-      console.log("Button clicked");
-      await handleCardClick(event, res);
+    // ── CARD_CLICKED → handle button clicks ──
+    if (eventType === "CARD_CLICKED") {
+      await handleCardClick(event, user, spaceName, res);
       return;
     }
 
-    // For non-interactive events, send 200 immediately
-    res.sendStatus(200);
-
-    if (!payload?.message) {
-      const spaceName = payload?.space?.name || chatData?.space?.name;
+    // ── ADDED_TO_SPACE → welcome message ──
+    if (eventType === "ADDED_TO_SPACE") {
+      res.sendStatus(200);
       if (spaceName) {
         await sendMessage(spaceName, "👋 Jira Bot ready! Tag me to create tickets.");
       }
       return;
     }
 
-    const message = payload.message;
-    const spaceName = message.space?.name || payload.space?.name;
-
-    if (!spaceName) {
-      console.error("No space name found in event");
+    // ── REMOVED_FROM_SPACE → just acknowledge ──
+    if (eventType === "REMOVED_FROM_SPACE") {
+      res.sendStatus(200);
       return;
     }
 
-    await handleMessage(message, spaceName);
+    // ── MESSAGE → handle user message ──
+    if (eventType === "MESSAGE") {
+      res.sendStatus(200);
+
+      const message = chatData.messagePayload?.message;
+      const msgSpaceName = spaceName;
+
+      if (!message || !msgSpaceName) {
+        console.error("No message or space name found in MESSAGE event");
+        return;
+      }
+
+      await handleMessage(message, msgSpaceName);
+      return;
+    }
+
+    // ── UNKNOWN event type ──
+    console.warn("Unhandled event type:", eventType);
+    res.sendStatus(200);
+
   } catch (err) {
     console.error("Top-level error:", err);
     if (!res.headersSent) {
@@ -183,20 +238,39 @@ app.post("/", async (req, res) => {
 });
 
 // ─── HANDLE CARD BUTTON CLICKS ───────────────────────────
-async function handleCardClick(event, res) {
+// In add-on format, button click data is inside chatData.buttonClickedPayload
+// and form inputs are in event.commonEventObject.formInputs
+async function handleCardClick(event, user, spaceName, res) {
   try {
-    const spaceName = event.space?.name;
-    const userName = event.user?.displayName || "Unknown";
-    const userEmail = event.user?.email || "unknown";
-    const userId = event.user?.name || userEmail;
+    const userName = user?.displayName || "Unknown";
+    const userEmail = user?.email || "unknown";
+    const userId = user?.name || userEmail;
 
-    const fn = event.common?.invokedFunction;
+    // In add-on HTTP format, the action name comes from parameters
+    const chatData = event.chat;
+    const commonEvent = event.commonEventObject || {};
+    const parameters = commonEvent.parameters || {};
+    const fn = parameters.actionName
+      || parameters.__action_method_name__
+      || commonEvent.invokedFunction;
+
+    // Form inputs from the card
+    const formInputs = commonEvent.formInputs || {};
+
+    console.log(`Button clicked: ${fn} by ${userName}`);
+    console.log("Parameters:", JSON.stringify(parameters));
+    console.log("Form inputs:", JSON.stringify(formInputs));
 
     if (!fn || !spaceName) {
-      console.error("Missing invokedFunction or space in CARD_CLICKED event");
+      console.error("Missing action or space in CARD_CLICKED event");
       res.json({
-        actionResponse: { type: "NEW_MESSAGE" },
-        text: "❌ Invalid request",
+        hostAppDataAction: {
+          chatDataAction: {
+            createMessageAction: {
+              message: { text: "❌ Invalid request" }
+            }
+          }
+        }
       });
       return;
     }
@@ -204,64 +278,96 @@ async function handleCardClick(event, res) {
     const sessionKey = userId;
     const session = sessions[sessionKey];
 
-    console.log(`Button clicked: ${fn} by ${userName}`);
-
     if (!session) {
       res.json({
-        actionResponse: { type: "NEW_MESSAGE" },
-        text: "⚠️ Session expired. Please start over.",
+        hostAppDataAction: {
+          chatDataAction: {
+            createMessageAction: {
+              message: { text: "⚠️ Session expired. Please start over." }
+            }
+          }
+        }
       });
       return;
     }
 
+    // Helper to extract form input values (handles both add-on formats)
+    const getFormValue = (fieldName) => {
+      const field = formInputs[fieldName];
+      if (!field) return null;
+      return field?.[""]?.stringInputs?.value?.[0]
+        || field?.stringInputs?.value?.[0]
+        || null;
+    };
+
     if (fn === "createTicket") {
-      const formInputs = event.common?.formInputs || {};
-      
-      if (formInputs.summary?.stringInputs?.value?.[0]) {
-        session.structured.summary = formInputs.summary.stringInputs.value[0];
-      }
-      if (formInputs.description?.stringInputs?.value?.[0]) {
-        session.structured.description = formInputs.description.stringInputs.value[0];
-      }
-      if (formInputs.priority?.stringInputs?.value?.[0]) {
-        session.structured.priority = formInputs.priority.stringInputs.value[0];
-      }
-      if (formInputs.issueType?.stringInputs?.value?.[0]) {
-        session.structured.issueType = formInputs.issueType.stringInputs.value[0];
-      }
+      const summary = getFormValue("summary");
+      const description = getFormValue("description");
+      const priority = getFormValue("priority");
+      const issueType = getFormValue("issueType");
+
+      if (summary) session.structured.summary = summary;
+      if (description) session.structured.description = description;
+      if (priority) session.structured.priority = priority;
+      if (issueType) session.structured.issueType = issueType;
 
       res.json({
-        actionResponse: { type: "NEW_MESSAGE" },
-        text: "⏳ Creating ticket...",
+        hostAppDataAction: {
+          chatDataAction: {
+            createMessageAction: {
+              message: { text: "⏳ Creating ticket..." }
+            }
+          }
+        }
       });
       await createTicket(session, userName, userEmail, sessionKey, spaceName);
 
     } else if (fn === "attach") {
       sessions[sessionKey].state = "WAITING_ATTACHMENT";
       res.json({
-        actionResponse: { type: "NEW_MESSAGE" },
-        text: "📎 Send your attachments now (attach a file to your message).",
+        hostAppDataAction: {
+          chatDataAction: {
+            createMessageAction: {
+              message: { text: "📎 Send your attachments now." }
+            }
+          }
+        }
       });
 
     } else if (fn === "cancel") {
       delete sessions[sessionKey];
       res.json({
-        actionResponse: { type: "NEW_MESSAGE" },
-        text: "🚫 Ticket cancelled.",
+        hostAppDataAction: {
+          chatDataAction: {
+            createMessageAction: {
+              message: { text: "🚫 Ticket cancelled." }
+            }
+          }
+        }
       });
 
     } else {
       res.json({
-        actionResponse: { type: "NEW_MESSAGE" },
-        text: "❌ Unknown action: " + fn,
+        hostAppDataAction: {
+          chatDataAction: {
+            createMessageAction: {
+              message: { text: "❌ Unknown action: " + fn }
+            }
+          }
+        }
       });
     }
   } catch (err) {
     console.error("Error handling card click:", err);
     if (!res.headersSent) {
       res.json({
-        actionResponse: { type: "NEW_MESSAGE" },
-        text: "❌ Error processing request",
+        hostAppDataAction: {
+          chatDataAction: {
+            createMessageAction: {
+              message: { text: "❌ Error processing request" }
+            }
+          }
+        }
       });
     }
   }
@@ -297,9 +403,6 @@ async function handleMessage(message, spaceName) {
   }
 
   if (session && session.state === "WAITING_ATTACHMENT") {
-    // ──────────────────────────────────────────
-    // FIX: Check "attachments" (plural — new format) AND "attachment" (singular — old format)
-    // ──────────────────────────────────────────
     const attachments = message.attachments || message.attachment || [];
 
     console.log("Attachments in event:", JSON.stringify(attachments, null, 2));
@@ -311,7 +414,6 @@ async function handleMessage(message, spaceName) {
       );
     }
 
-    // Store the message name — we need it to fetch full attachment data via Chat API
     sessions[sessionKey].messageName = message.name;
     sessions[sessionKey].attachmentHints = attachments;
 
@@ -342,26 +444,23 @@ async function handleMessage(message, spaceName) {
 
 // ─── SAVE DRAFT ───────────────────────────────
 async function saveDraft(structured, rawText, senderName, senderEmail, sessionKey, spaceName) {
-  // Fetch device info to show in draft
   const deviceInfo = await getDeviceInfo(senderEmail);
-  
-  // Format device info for display
+
   const deviceInfoText = `【Device Name】${deviceInfo.deviceName}
 【Watch MAC】${deviceInfo.watchMAC}
 【Watch Version】${deviceInfo.watchVersion}
 【Mobile Version】${deviceInfo.mobileVersion}
 【App Version】${deviceInfo.appVersion}`;
-  
-  // Store in session for later use in ticket creation
-  sessions[sessionKey] = { 
-    state: "DRAFT", 
-    structured, 
-    rawText, 
+
+  sessions[sessionKey] = {
+    state: "DRAFT",
+    structured,
+    rawText,
     senderName,
-    deviceInfo 
+    deviceInfo
   };
   console.log("deviceInfo stored in session:", deviceInfoText);
-  // Format steps to reproduce if present
+
   let stepsSection = "";
   if (structured.stepsToReproduce && Array.isArray(structured.stepsToReproduce) && structured.stepsToReproduce.length > 0) {
     const formattedSteps = structured.stepsToReproduce
@@ -370,7 +469,6 @@ async function saveDraft(structured, rawText, senderName, senderEmail, sessionKe
     stepsSection = `\n\n*Steps to Reproduce:*\n${formattedSteps}`;
   }
 
-  // Create card with editable form fields
   const card = {
     cardId: "draft-ticket",
     card: {
@@ -464,7 +562,10 @@ async function saveDraft(structured, rawText, senderName, senderEmail, sessionKe
                     text: "✅ Create Ticket",
                     onClick: {
                       action: {
-                        function: "createTicket",
+                        function: CLOUD_RUN_URL,
+                        parameters: [
+                          { key: "actionName", value: "createTicket" }
+                        ],
                       },
                     },
                   },
@@ -559,11 +660,9 @@ Format:
 async function createTicket(session, senderName, senderEmail, sessionKey, spaceName) {
   try {
     const s = session.structured;
-    
-    // Use device info from session (already fetched during draft)
+
     const deviceInfo = session.deviceInfo || await getDeviceInfo(senderEmail);
-    
-    // Format steps to reproduce if present
+
     let stepsSection = "";
     if (s.stepsToReproduce && Array.isArray(s.stepsToReproduce) && s.stepsToReproduce.length > 0) {
       const formattedSteps = s.stepsToReproduce
@@ -571,7 +670,7 @@ async function createTicket(session, senderName, senderEmail, sessionKey, spaceN
         .join('\n');
       stepsSection = `\n\n【Steps to Reproduce】\n${formattedSteps}`;
     }
-    
+
     const deviceInfoText = `【Device Name】${deviceInfo.deviceName}
 【Watch MAC】${deviceInfo.watchMAC}
 【Watch Version】${deviceInfo.watchVersion}
@@ -614,7 +713,6 @@ ${s.description}${stepsSection}`;
     console.log("Jira response:", JSON.stringify(data));
 
     if (data.key) {
-      // Handle attachments
       let attachmentStatus = "";
       if (session.messageName && session.attachmentHints?.length > 0) {
         const results = await downloadAndUploadAttachments(
@@ -645,29 +743,17 @@ ${s.description}${stepsSection}`;
 }
 
 // ─── DOWNLOAD FROM GOOGLE CHAT & UPLOAD TO JIRA ───────────
-//
-// The webhook event only sends partial attachment metadata (contentName, contentType).
-// It does NOT include attachmentDataRef.resourceName needed to download the file.
-//
-// Solution:
-// 1. Use chat.spaces.messages.get() to fetch the FULL message with complete attachment data
-// 2. Extract attachmentDataRef.resourceName from the full response
-// 3. Use chat.media.download() with that resourceName to get the file bytes
-// 4. Upload the file bytes to Jira
-//
 async function downloadAndUploadAttachments(issueKey, messageName) {
   const results = [];
   const chat = getChatClient();
 
   try {
-    // Step 1: Fetch the full message from Chat API to get complete attachment data
     console.log("Fetching full message:", messageName);
     const messageResponse = await chat.spaces.messages.get({
       name: messageName,
     });
 
     const fullMessage = messageResponse.data;
-    // The full message uses "attachment" (singular) as the field name
     const fullAttachments = fullMessage.attachment || fullMessage.attachments || [];
 
     console.log("Full message attachment data:", JSON.stringify(fullAttachments, null, 2));
@@ -677,7 +763,6 @@ async function downloadAndUploadAttachments(issueKey, messageName) {
       return [{ success: false, fileName: "unknown", error: "No attachments in full message" }];
     }
 
-    // Step 2: Process each attachment
     for (const att of fullAttachments) {
       const fileName = att.contentName || "attachment";
       const contentType = att.contentType || "application/octet-stream";
@@ -689,7 +774,6 @@ async function downloadAndUploadAttachments(issueKey, messageName) {
         let fileBuffer;
 
         if (att.attachmentDataRef?.resourceName) {
-          // ── PRIMARY METHOD: direct HTTP GET with ?alt=media ──
           const resourceName = att.attachmentDataRef.resourceName;
           console.log("Downloading via direct HTTP, resourceName:", resourceName);
 
@@ -697,9 +781,6 @@ async function downloadAndUploadAttachments(issueKey, messageName) {
           const tokenResponse = await authClient.getAccessToken();
           const accessToken = tokenResponse.token || tokenResponse;
 
-          // IMPORTANT: Do NOT use encodeURIComponent on resourceName — it's base64
-          // with = and / characters that must NOT be percent-encoded.
-          // Plain string concat keeps the URL clean.
           const finalUrl = "https://chat.googleapis.com/v1/media/" + resourceName + "?alt=media";
           console.log(">>> Download URL:", finalUrl);
 
@@ -719,7 +800,6 @@ async function downloadAndUploadAttachments(issueKey, messageName) {
           fileBuffer = await dlResponse.buffer();
 
         } else if (att.driveDataRef?.driveFileId) {
-          // ── DRIVE FILE: not supported yet ──
           console.log("Skipping Drive attachment:", att.driveDataRef.driveFileId);
           results.push({
             success: false,
@@ -729,7 +809,6 @@ async function downloadAndUploadAttachments(issueKey, messageName) {
           continue;
 
         } else if (att.downloadUri) {
-          // ── FALLBACK: try downloadUri with bearer token ──
           console.log("Trying downloadUri fallback:", att.downloadUri);
           const authClient = await googleAuth.getClient();
           const tokenResponse = await authClient.getAccessToken();
@@ -752,7 +831,6 @@ async function downloadAndUploadAttachments(issueKey, messageName) {
 
         console.log(`Downloaded ${fileName}: ${fileBuffer.length} bytes`);
 
-        // Step 3: Upload to Jira
         const form = new FormData();
         form.append("file", fileBuffer, {
           filename: fileName,
