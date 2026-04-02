@@ -3,12 +3,10 @@ import fetch from "node-fetch";
 import dotenv from "dotenv";
 import { google } from "googleapis";
 import FormData from "form-data";
-import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 
 const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 dotenv.config();
 
@@ -69,6 +67,24 @@ async function sendMessage(spaceName, text) {
   }
 }
 
+// ─── SEND CARD MESSAGE TO GOOGLE CHAT ──────────────
+async function sendCardMessage(spaceName, cardJson) {
+  try {
+    console.log("Sending card:", JSON.stringify(cardJson, null, 2));
+    const chat = getChatClient();
+    const response = await chat.spaces.messages.create({
+      parent: spaceName,
+      requestBody: {
+        cardsV2: [cardJson],
+      },
+    });
+    console.log("Card sent successfully:", response.data);
+  } catch (err) {
+    console.error("Failed to send Google Chat card:", err.message);
+    console.error("Full error:", err);
+  }
+}
+
 // ─── GET DEVICE INFO FROM API ────────────────
 async function getDeviceInfo(email) {
   try {
@@ -118,17 +134,28 @@ async function getDeviceInfo(email) {
 
 // ─── ENTRY POINT ──────────────────────────────
 app.post("/", async (req, res) => {
-  res.sendStatus(200);
-
   try {
     const event = req.body;
     console.log("===== FULL RAW EVENT =====");
     console.log(JSON.stringify(event, null, 2));
+    console.log("Event type:", event.type);
     console.log("===== END EVENT =====");
+
+    // Handle button clicks (CARD_CLICKED event)
+
 
     // Support both old format (event.chat) and new format (event.event.chat)
     const chatData = event.event?.chat || event.chat;
     const payload = chatData?.messagePayload;
+
+    if (chatData?.buttonClickedPayload) {
+      console.log("Button clicked");
+      await handleCardClick(event, res);
+      return;
+    }
+
+    // For non-interactive events, send 200 immediately
+    res.sendStatus(200);
 
     if (!payload?.message) {
       const spaceName = payload?.space?.name || chatData?.space?.name;
@@ -149,8 +176,96 @@ app.post("/", async (req, res) => {
     await handleMessage(message, spaceName);
   } catch (err) {
     console.error("Top-level error:", err);
+    if (!res.headersSent) {
+      res.sendStatus(500);
+    }
   }
 });
+
+// ─── HANDLE CARD BUTTON CLICKS ───────────────────────────
+async function handleCardClick(event, res) {
+  try {
+    const spaceName = event.space?.name;
+    const userName = event.user?.displayName || "Unknown";
+    const userEmail = event.user?.email || "unknown";
+    const userId = event.user?.name || userEmail;
+
+    const fn = event.common?.invokedFunction;
+
+    if (!fn || !spaceName) {
+      console.error("Missing invokedFunction or space in CARD_CLICKED event");
+      res.json({
+        actionResponse: { type: "NEW_MESSAGE" },
+        text: "❌ Invalid request",
+      });
+      return;
+    }
+
+    const sessionKey = userId;
+    const session = sessions[sessionKey];
+
+    console.log(`Button clicked: ${fn} by ${userName}`);
+
+    if (!session) {
+      res.json({
+        actionResponse: { type: "NEW_MESSAGE" },
+        text: "⚠️ Session expired. Please start over.",
+      });
+      return;
+    }
+
+    if (fn === "createTicket") {
+      const formInputs = event.common?.formInputs || {};
+      
+      if (formInputs.summary?.stringInputs?.value?.[0]) {
+        session.structured.summary = formInputs.summary.stringInputs.value[0];
+      }
+      if (formInputs.description?.stringInputs?.value?.[0]) {
+        session.structured.description = formInputs.description.stringInputs.value[0];
+      }
+      if (formInputs.priority?.stringInputs?.value?.[0]) {
+        session.structured.priority = formInputs.priority.stringInputs.value[0];
+      }
+      if (formInputs.issueType?.stringInputs?.value?.[0]) {
+        session.structured.issueType = formInputs.issueType.stringInputs.value[0];
+      }
+
+      res.json({
+        actionResponse: { type: "NEW_MESSAGE" },
+        text: "⏳ Creating ticket...",
+      });
+      await createTicket(session, userName, userEmail, sessionKey, spaceName);
+
+    } else if (fn === "attach") {
+      sessions[sessionKey].state = "WAITING_ATTACHMENT";
+      res.json({
+        actionResponse: { type: "NEW_MESSAGE" },
+        text: "📎 Send your attachments now (attach a file to your message).",
+      });
+
+    } else if (fn === "cancel") {
+      delete sessions[sessionKey];
+      res.json({
+        actionResponse: { type: "NEW_MESSAGE" },
+        text: "🚫 Ticket cancelled.",
+      });
+
+    } else {
+      res.json({
+        actionResponse: { type: "NEW_MESSAGE" },
+        text: "❌ Unknown action: " + fn,
+      });
+    }
+  } catch (err) {
+    console.error("Error handling card click:", err);
+    if (!res.headersSent) {
+      res.json({
+        actionResponse: { type: "NEW_MESSAGE" },
+        text: "❌ Error processing request",
+      });
+    }
+  }
+}
 
 // ─── HANDLE MESSAGE ───────────────────────────
 async function handleMessage(message, spaceName) {
@@ -171,10 +286,6 @@ async function handleMessage(message, spaceName) {
   if (session && session.state === "DRAFT") {
     if (cleanText === "/confirm")
       return await createTicket(session, senderName, senderEmail, sessionKey, spaceName);
-    if (cleanText === "/rephrase") {
-      sessions[sessionKey].state = "WAITING_REPHRASE";
-      return await sendMessage(spaceName, "✏️ Re-describe your issue.");
-    }
     if (cleanText === "/attach") {
       sessions[sessionKey].state = "WAITING_ATTACHMENT";
       return await sendMessage(spaceName, "📎 Send your attachments now (attach a file to your message).");
@@ -217,13 +328,6 @@ async function handleMessage(message, spaceName) {
     );
   }
 
-  if (session && session.state === "WAITING_REPHRASE") {
-    const structured = await parseWithOpenAI(cleanText, senderName);
-    if (!structured)
-      return await sendMessage(spaceName, "❌ Couldn't parse your request. Please try again.");
-    return await saveDraft(structured, cleanText, senderName, senderEmail, sessionKey, spaceName);
-  }
-
   // ── NEW MESSAGE ─────────────────────────────
   if (!cleanText) {
     return await sendMessage(spaceName, "👋 Describe your issue and I'll create a Jira ticket!");
@@ -257,26 +361,139 @@ async function saveDraft(structured, rawText, senderName, senderEmail, sessionKe
     deviceInfo 
   };
   console.log("deviceInfo stored in session:", deviceInfoText);
-  const draftText = `📋 *Draft Ticket*
+  // Format steps to reproduce if present
+  let stepsSection = "";
+  if (structured.stepsToReproduce && Array.isArray(structured.stepsToReproduce) && structured.stepsToReproduce.length > 0) {
+    const formattedSteps = structured.stepsToReproduce
+      .map((step, index) => `${index + 1}. ${step}`)
+      .join('\n');
+    stepsSection = `\n\n*Steps to Reproduce:*\n${formattedSteps}`;
+  }
 
-*Summary:* ${structured.summary}
-*Priority:* ${structured.priority}
-*Type:* ${structured.issueType}
+  // Create card with editable form fields
+  const card = {
+    cardId: "draft-ticket",
+    card: {
+      header: {
+        title: "📋 Create Jira Ticket",
+      },
+      sections: [
+        {
+          widgets: [
+            {
+              textInput: {
+                name: "summary",
+                label: "Summary",
+                type: "SINGLE_LINE",
+                value: structured.summary,
+              },
+            },
+            {
+              textInput: {
+                name: "description",
+                label: "Description",
+                type: "MULTIPLE_LINE",
+                value: `${structured.description}${stepsSection ? '\n\n' + stepsSection.replace(/\*/g, '') : ''}`,
+              },
+            },
+            {
+              selectionInput: {
+                name: "priority",
+                label: "Priority",
+                type: "DROPDOWN",
+                items: [
+                  {
+                    text: "High",
+                    value: "High",
+                    selected: (structured.priority === "High"),
+                  },
+                  {
+                    text: "Medium",
+                    value: "Medium",
+                    selected: (structured.priority === "Medium" || !structured.priority),
+                  },
+                  {
+                    text: "Low",
+                    value: "Low",
+                    selected: (structured.priority === "Low"),
+                  },
+                ],
+              },
+            },
+            {
+              selectionInput: {
+                name: "issueType",
+                label: "Issue Type",
+                type: "DROPDOWN",
+                items: [
+                  {
+                    text: "Bug",
+                    value: "Bug",
+                    selected: (structured.issueType === "Bug" || !structured.issueType),
+                  },
+                  {
+                    text: "Task",
+                    value: "Task",
+                    selected: (structured.issueType === "Task"),
+                  },
+                  {
+                    text: "Improvement",
+                    value: "Improvement",
+                    selected: (structured.issueType === "Improvement"),
+                  },
+                ],
+              },
+            },
+            {
+              textParagraph: {
+                text: `<b>Device Info (Auto-detected):</b><br>${deviceInfoText.replace(/\n/g, '<br>')}`,
+              },
+            },
+            {
+              divider: {},
+            },
+            {
+              textParagraph: {
+                text: `<i>Note: Click 'Attach Files' if you want to add attachments before creating the ticket.</i>`,
+              },
+            },
+            {
+              buttonList: {
+                buttons: [
+                  {
+                    text: "✅ Create Ticket",
+                    onClick: {
+                      action: {
+                        function: "createTicket",
+                      },
+                    },
+                  },
+                  {
+                    text: "📎 Attach Files",
+                    onClick: {
+                      action: {
+                        function: "attach",
+                      },
+                    },
+                  },
+                  {
+                    text: "🚫 Cancel",
+                    onClick: {
+                      action: {
+                        function: "cancel",
+                      },
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    },
+  };
 
-*Device Info:*
-${deviceInfoText}
-
-*Description:*
-${structured.description}
-
-──────────────
-Reply:
-✅ /confirm
-✏️ /rephrase
-📎 /attach
-🚫 /cancel`;
-
-  await sendMessage(spaceName, draftText);
+  await sendCardMessage(spaceName, card);
 }
 
 // ─── OPENAI PARSER ────────────────────────────
@@ -300,10 +517,14 @@ async function parseWithOpenAI(text, senderName) {
             content: `You extract Jira ticket fields from user messages. 
 Respond ONLY with raw JSON, no markdown, no code fences, no explanation.
 You have to only provide the priority if it's explicitly mentioned by the user, otherwise leave it blank.
+
+If the user mentions "steps to reproduce" or similar phrases, extract them as a separate field. Format steps as an array of strings (one per step). If not mentioned, omit the stepsToReproduce field entirely.
+
 Format:
 {
   "summary": "short title",
   "description": "detailed description",
+  "stepsToReproduce": ["step 1", "step 2", "step 3"],
   "priority": "High|Medium|Low",
   "issueType": "Bug|Task|Improvement"
 }`,
@@ -341,6 +562,16 @@ async function createTicket(session, senderName, senderEmail, sessionKey, spaceN
     
     // Use device info from session (already fetched during draft)
     const deviceInfo = session.deviceInfo || await getDeviceInfo(senderEmail);
+    
+    // Format steps to reproduce if present
+    let stepsSection = "";
+    if (s.stepsToReproduce && Array.isArray(s.stepsToReproduce) && s.stepsToReproduce.length > 0) {
+      const formattedSteps = s.stepsToReproduce
+        .map((step, index) => `${index + 1}. ${step}`)
+        .join('\n');
+      stepsSection = `\n\n【Steps to Reproduce】\n${formattedSteps}`;
+    }
+    
     const deviceInfoText = `【Device Name】${deviceInfo.deviceName}
 【Watch MAC】${deviceInfo.watchMAC}
 【Watch Version】${deviceInfo.watchVersion}
@@ -349,7 +580,7 @@ async function createTicket(session, senderName, senderEmail, sessionKey, spaceN
 
 ─────────────────
 
-${s.description}`;
+${s.description}${stepsSection}`;
 
     const response = await fetch(`${JIRA_DOMAIN}/rest/api/3/issue`, {
       method: "POST",
@@ -362,7 +593,7 @@ ${s.description}`;
       body: JSON.stringify({
         fields: {
           project: { key: JIRA_PROJECT },
-          summary: `[${senderName}] ${s.summary}`,
+          summary: `${s.summary}`,
           description: {
             type: "doc",
             version: 1,
