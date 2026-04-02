@@ -328,7 +328,7 @@ async function handleCardClick(event, user, spaceName, res) {
         hostAppDataAction: {
           chatDataAction: {
             createMessageAction: {
-              message: { text: "📎 Send your attachments now." }
+              message: { text: "📎 Send your attachments now. Dont forget to tag Jira Bot :) (attach a file to your message)." }
             }
           }
         }
@@ -394,7 +394,7 @@ async function handleMessage(message, spaceName) {
       return await createTicket(session, senderName, senderEmail, sessionKey, spaceName);
     if (cleanText === "/attach") {
       sessions[sessionKey].state = "WAITING_ATTACHMENT";
-      return await sendMessage(spaceName, "📎 Send your attachments now (attach a file to your message).");
+      return await sendMessage(spaceName, "📎 Send your attachments now. Dont forget to tag Jira Bot :) (attach a file to your message).");
     }
     if (cleanText === "/cancel") {
       delete sessions[sessionKey];
@@ -573,7 +573,10 @@ async function saveDraft(structured, rawText, senderName, senderEmail, sessionKe
                     text: "📎 Attach Files",
                     onClick: {
                       action: {
-                        function: "attach",
+                        function: CLOUD_RUN_URL,
+                        parameters: [
+                          { key: "actionName", value: "attach" }
+                        ],
                       },
                     },
                   },
@@ -581,7 +584,10 @@ async function saveDraft(structured, rawText, senderName, senderEmail, sessionKe
                     text: "🚫 Cancel",
                     onClick: {
                       action: {
-                        function: "cancel",
+                        function: CLOUD_RUN_URL,
+                        parameters: [
+                          { key: "actionName", value: "cancel" }
+                        ],
                       },
                     },
                   },
